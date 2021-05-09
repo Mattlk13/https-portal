@@ -2,20 +2,29 @@ require 'date'
 
 module OpenSSL
   def self.ensure_account_key
-    path = '/var/lib/https-portal/account.key'
+    path = "#{NAConfig.portal_base_dir}/account.key"
     unless File.exist?(path) && system("openssl rsa --in #{path} --noout --check")
       system "openssl genrsa 4096 > #{path}"
     end
   end
 
-  def self.ensure_domain_key(domain)
-    unless File.exist?(domain.key_path) && system("openssl rsa --in #{domain.key_path} --noout --check")
-      system "openssl genrsa #{ENV['NUMBITS'] =~ /^[0-9]+$/ ? ENV['NUMBITS'] : 2048} > #{domain.key_path}"
+  def self.create_ongoing_domain_key(domain)
+    algo = NAConfig.certificate_algorithm
+    Logger.debug "create_ongoing_domain_key #{algo} for #{domain.name}"
+    if algo == "rsa"
+      system "openssl genrsa #{NAConfig.key_length} > #{domain.ongoing_key_path}"
+    else
+      system "openssl ecparam -genkey -name #{algo} -noout -out #{domain.ongoing_key_path}"
     end
   end
 
   def self.create_csr(domain)
-    system "openssl req -new -sha256 -key #{domain.key_path} -subj '/CN=#{domain.name}' > #{domain.csr_path}"
+    Logger.debug "create_csr for #{domain.name}"
+    system "openssl req -new -sha256 -key #{domain.ongoing_key_path} -subj '/CN=#{domain.name}' > #{domain.csr_path}"
+  end
+
+  def self.key_and_cert_exist?(domain)
+    File.exist?(domain.key_path) && File.exist?(domain.signed_cert_path)
   end
 
   def self.need_to_sign_or_renew?(domain)
@@ -23,7 +32,8 @@ module OpenSSL
 
     skip_conditions = File.exist?(domain.key_path) &&
                       File.exist?(domain.signed_cert_path) &&
-                      expires_in_days(domain.signed_cert_path) > 30
+                      (domain.stage == 'local' || !self_signed?(domain.signed_cert_path)) &&
+                      expires_in_days(domain.signed_cert_path) > NAConfig.renew_margin_days
 
     !skip_conditions
   end
@@ -41,19 +51,41 @@ module OpenSSL
   def self.self_sign(domain)
     puts "Self-signing test certificate for #{domain.name}"
 
-    ensure_domain_key(domain)
+    create_ongoing_domain_key(domain)
 
     command = <<-EOC
     openssl x509 -req -days 90 \
       -in #{domain.csr_path} \
-      -signkey #{domain.key_path} \
+      -signkey #{domain.ongoing_key_path} \
       -out #{domain.signed_cert_path}
+    EOC
+
+    system command && ACME.rename_ongoing_cert_and_key(domain)
+  end
+
+  def self.generate_dummy_certificate(dir, out_path, keyout_path)
+    puts "Generating dummy certificate for default fallback server"
+
+    command = <<-EOC
+      mkdir -p #{dir} && \
+      openssl req -x509 -newkey \
+        rsa:#{NAConfig.key_length} -nodes \
+        -out #{out_path} \
+        -keyout #{keyout_path} \
+        -days 36500 \
+        -batch \
+        -subj "/CN=default-server.example.com"
     EOC
 
     system command
   end
 
   private
+
+  def self.self_signed?(pem)
+    issuer = `openssl x509 -issuer -noout -in #{pem}`
+    issuer.include? "default-server.example.com"
+  end
 
   def self.expires_at(pem)
     date_str = `openssl x509 -enddate -noout -in #{pem}`.sub('notAfter=', '')

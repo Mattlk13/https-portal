@@ -23,15 +23,19 @@ Docker Hub page:
     - [Automatic Container Discovery](#automatic-container-discovery)
     - [Hybrid Setup with Non-Dockerized Apps](#hybrid-setup-with-non-dockerized-apps)
     - [Multiple Domains](#multiple-domains)
+    - [Multiple Upstreams](#multiple-upstreams)
     - [Serving Static Sites](#serving-static-sites)
     - [Share Certificates with Other Apps](#share-certificates-with-other-apps)
     - [HTTP Basic Auth](#http-basic-auth)
     - [Access Restriction](#access-restriction)
     - [Logging configuration](#logging-configuration)
     - [Debugging](#debugging)
+    - [Other configurations](#other-configurations)
   - [Advanced Usage](#advanced-usage)
     - [Configure Nginx through Environment Variables](#configure-nginx-through-environment-variables)
+    - [Change Configuration Dynamically](#change-configuration-dynamically)
     - [Override Nginx Configuration Files](#override-nginx-configuration-files)
+    - [Manually Set Private Key Length/Type](#manually-set-private-key-length-type)
   - [How It Works](#how-it-works)
   - [About Rate Limits of Let's Encrypt](#about-rate-limits-of-lets-encrypt)
   - [Troubleshooting](#troubleshooting)
@@ -59,14 +63,22 @@ Create a `docker-compose.yml` file with the following content in any directory
 of your choice:
 
 ```yaml
-https-portal:
-  image: steveltn/https-portal:1
-  ports:
-    - '80:80'
-    - '443:443'
-  environment:
-    DOMAINS: 'example.com'
-    # STAGE: 'production' # Don't use production until staging works
+version: '3'
+
+services:
+  https-portal:
+    image: steveltn/https-portal:1
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      DOMAINS: 'example.com'
+      # STAGE: 'production' # Don't use production until staging works
+    volumes:
+      - https-portal-data:/var/lib/https-portal
+
+volumes:
+    https-portal-data: # Recommended, to avoid re-signing when upgrading HTTPS-PORTAL
 ```
 
 Run the `docker-compose up` command in the same directory. A moment later you'll
@@ -79,6 +91,8 @@ Here is a more real-world example: Create the file `docker-compose.yml` in anoth
 directory:
 
 ```yaml
+version: '3'
+
 https-portal:
   image: steveltn/https-portal:1
   ports:
@@ -91,6 +105,8 @@ https-portal:
     DOMAINS: 'wordpress.example.com -> http://wordpress:80'
     # STAGE: 'production' # Don't use production until staging works
     # FORCE_RENEW: 'true'
+  volumes: 
+    - https-portal-data:/var/lib/https-portal
 
 wordpress:
   image: wordpress
@@ -101,6 +117,9 @@ db:
   image: mariadb
   environment:
     MYSQL_ROOT_PASSWORD: '<a secure password>'
+
+volumes:
+  https-portal-data:
 ```
 
 Run the `docker-compose up -d` command. A moment later you'll get a WordPress
@@ -203,7 +222,7 @@ services:
 
 **Caveat**: Your web application must be created in the same network as HTTPS-PORTAL.
 
-Note that here is **no need** to link your web service to HTTPS-PORTAL, and you **shouldn't** put `example.com` in environment variable `DOMAINS` of HTTP-PORTAL.
+Note that here is **no need** to link your web service to HTTPS-PORTAL, and you **shouldn't** put `example.com` in environment variable `DOMAINS` of HTTPS-PORTAL.
 
 This feature allows you to deploy multiple web applications on the same host
 without restarting HTTPS-PORTAL itself or interrupting any other application while
@@ -281,6 +300,21 @@ You can also specify the stage (`local`, `staging`, or `production`) for each in
 DOMAINS: 'wordpress.example.com -> http://wordpress #local, gitlab.example.com #staging'
 ```
 
+### Multiple Upstreams
+
+It's possible to define multiple upstreams for a domain for the purpose of load-balancing and/or HA.
+Just add additional upstreams separated by a pipe separator. Each upstream can have custom parameters.
+
+```yaml
+https-portal:
+  # ...
+  environment:
+    DOMAINS: 'wordpress.example.com -> http://wordpress1:80|wordpress2:80[weight=2 max_conns=100]
+```
+
+
+See [Nginx Upstream-Module](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#server) for possible parameters.
+
 ### Serving Static Sites
 
 Instead of forwarding requests to web applications, HTTPS-PORTAL can also serve
@@ -292,6 +326,7 @@ https-portal:
   environment:
     DOMAINS: 'hexo.example.com, octopress.example.com'
   volumes:
+    - https-portal-data:/var/lib/https-portal
     - /data/https-portal/vhosts:/var/www/vhosts
 ```
 
@@ -399,6 +434,7 @@ By default no Nginx access logs are written, and error logs are written to stdou
       ERROR_LOG: default
       ACCESS_LOG: default
     volumes:
+      - https-portal-data:/var/lib/https-portal
       - /path/to/log/directory:/var/log/nginx/
       - /path/to/logrotate/state/directory:/var/lib/logrotate/
   ```
@@ -420,6 +456,7 @@ By default no Nginx access logs are written, and error logs are written to stdou
       ERROR_LOG: /var/log/custom-logs/error.log
       ACCESS_LOG: /var/log/custom-logs/access.log
     volumes:
+      - https-portal-data:/var/lib/https-portal
       - /path/to/log/directory:/var/log/custom-logs/
   ```
 
@@ -437,9 +474,15 @@ By default no Nginx access logs are written, and error logs are written to stdou
 With the environment variable `DEBUG=true` you can see more info printed about domain parsing, such as:
 
 ```
-DEBUG: name:'example.com' upstream:'' redirect_target:''
+DEBUG: name:'example.com' upstreams:'' redirect_target:''
 ```
 
+### Other Configurations
+
+By default, HTTPS-PORTAL renews the certificate about 30 days before the expiry. You can customize it by:
+```
+RENEW_MARGIN_DAYS=30
+```
 
 ## Advanced Usage
 
@@ -528,17 +571,28 @@ You can also make it multi-line:
 
 The `CUSTOM_NGINX_SERVER_CONFIG_BLOCK` will be inserted after all other configuration blocks listed in section "Configure Nginx through Environment Variables", and it might conflict with other configurations.
 
+In addition to the global `CUSTOM_NGINX_SERVER_CONFIG_BLOCK`, which applies to all configurations, there are `CUSTOM_NGINX_<UPPERCASE_AND_UNDERSCORED_DOMAIN_NAME>_CONFIG_BLOCK`s, which are inserted after the `CUSTOM_NGINX_SERVER_CONFIG_BLOCK`, but only into the configuration file for a specific site. **For instance**, To make specific changes to `example.com` only, create an environment variable `CUSTOM_NGINX_EXAMPLE_COM_CONFIG_BLOCK`.
+
 ```
 # generated Nginx config:
 server {
 	listen 443 ssl http2;
 	... # (other configurations)
 	<%= CUSTOM_NGINX_SERVER_CONFIG_BLOCK %>
+	<%= CUSTOM_NGINX_<DOMAIN_NAME>_CONFIG_BLOCK %>
 	location / {
 		...
 	}
 }
 ```
+
+### Change Configuration Dynamically
+
+Environment variables may be dynamically overridden by modifying files
+`/var/lib/https-portal/dynamic-env`. The file's name and contents will create
+an environment variable with that name and contents, respectively. About 1s
+after the last modification, the configuration will be updated to reflect the
+new configuration. This allows modifying the configuration without downtime.
 
 ### Override Nginx Configuration Files
 
@@ -547,7 +601,7 @@ nginx.conf containing a valid `server` block. The custom nginx configurations
 are [ERB](http://www.stuartellis.eu/articles/erb/) templates and will be
 rendered before usage.
 
-You can either override just override one single site's config or all sites' configs.
+You can either just override one single site's config or all sites' configs.
 
 #### Override just one single site's config
 
@@ -560,6 +614,7 @@ you can launch HTTPS-PORTAL by:
 https-portal:
   # ...
   volumes:
+    - https-portal-data:/var/lib/https-portal
     - /path/to/http_config:/var/lib/nginx-conf/my.example.com.conf.erb:ro
     - /path/to/https_config:/var/lib/nginx-conf/my.example.com.ssl.conf.erb:ro
 ```
@@ -575,7 +630,7 @@ If you want to make an Nginx configuration that will be used by all sites, you c
 
 Since the config files will be used on all your sites, please keep using the variables already in the file and don't hard-code anything.
 
-### Manually Set RSA Private Key Length
+### Manually Set Private Key Length/Type
 
 By default, HTTPS-PORTAL generate `2048` bits long RSA private key.  
 However, you can manually set RSA private key length (`numbits` of `openssl genrsa` command) through `NUMBITS` environment variable.
@@ -586,6 +641,10 @@ https-portal:
   environment:
     NUMBITS: '4096'
 ```
+
+Alternatively, you can set the `CERTIFICATE_ALGORITHM` environment variable to `prime256v1`, as [recommended by Mozilla](https://wiki.mozilla.org/Security/Server_Side_TLS#Modern_compatibility). Note however, that this setting prevents some older clients/systems from connecting.
+
+Both settings apply to newly generated keys only. If you would like to update existing keys, remove the existing keys stored under `/var/lib/https-portal` and restart `https-portal`.
 
 ## How It Works
 
@@ -626,6 +685,8 @@ everything is good, you can switch to production mode with `STAGE:
 
 ## Troubleshooting
 
+### Force renew
+
 If you find your certificates are not chained correctly, please run the container
 again with the follow setting once:
 
@@ -638,9 +699,18 @@ https-portal:
 ```
 
 This is because with ACME v2 returns the full chain instead of a partial chain 
-with ACME v1. If you have old certificates stored, HTTPS-PORTAl may not be able 
+with ACME v1. If you have old certificates stored, HTTPS-PORTAL may not be able 
 to handle the case correctly. If you run into this issue, just `FORCE_RENEW` to 
 obtain a new set of certificates.
+
+### Reset the data volume
+
+If you find HTTPS-PORTAL is not behaving as expected, try to reset the data volume:
+
+```
+docker-compose down -v
+docker-compose up
+```
 
 ## Credits
 

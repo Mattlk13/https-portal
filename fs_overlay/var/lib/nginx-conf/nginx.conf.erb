@@ -12,7 +12,7 @@ events {
 http {
     include       /etc/nginx/mime.types;
     default_type  application/octet-stream;
-
+    ssl_protocols TLSv1.2 TLSv1.3;
 
     <% if ENV['ACCESS_LOG_INCLUDE_HOST'] == 'on' %>
     log_format  main  '$host:$server_port $remote_addr - $remote_user [$time_local] "$request" '
@@ -115,8 +115,13 @@ http {
 
     include /etc/nginx/conf.d/*.conf;
 
+    # Prevent Nginx from leaking other server configurations on the same machine
     server {
         listen      80 default_server;
+        listen      443 ssl default_server;
+
+        ssl_certificate <%= NAConfig.portal_base_dir %>/default_server/default_server.crt;
+        ssl_certificate_key <%= NAConfig.portal_base_dir %>/default_server/default_server.key;
         server_name _;
         return      444;
     }
